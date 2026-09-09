@@ -1,0 +1,29 @@
+{
+  "package": "workshop_easy_installation_ovms",
+  "audience": "broader team requiring automated setup",
+  "target": "Windows x64 (Intel GPU recommended, CPU fallback supported)",
+  "installation": "Install-OVMSLocalWorkshop.ps1",
+  "model_configuration": "model-config.json",
+  "installed_workshop_directory": "%USERPROFILE%\\OVMS-Local-Workshop\\hermes-ovms-workshop-windows-x64-intel-v1.0.0",
+  "components": {
+    "hermes_commit": "30b83ab7b1f194503de9f5545d88c81c4db91e3f",
+    "ovms_release": "v2026.3.1",
+    "ovms_download": "https://github.com/openvinotoolkit/model_server/releases/download/v2026.3.1/ovms_windows_2026.3.1_python_on.zip",
+    "default_model": "qwen3.5-27b",
+    "supported_models": {
+      "qwen3.5-27b": "OpenVINO/Qwen3.5-27B-int4-ov",
+      "qwen3.6-27b": "OpenVINO/Qwen3.6-27B-int4-ov",
+      "gemma4": "OpenVINO/gemma-4-26b-a4b-it-int4-ov",
+      "qwen3-35b": "OpenVINO/Qwen3.6-35B-A3B-int4-ov"
+    }
+  },
+  "model_bundled": false,
+  "model_download_automated": true,
+  "local_endpoint": "http://127.0.0.1:8000/v1",
+  "manual_prerequisites": {
+    "git_for_windows": false,
+    "uv": false,
+    "vulkan_sdk": false,
+    "note": "OVMS is a self-contained prebuilt zip and the Hermes installer provisions its own portable Git and uv automatically; OpenVINO's GPU plugin uses the Intel graphics driver directly, not Vulkan."
+  }
+}

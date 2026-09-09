@@ -1,0 +1,26 @@
+{
+  "qwen3.5-27b": {
+    "SourceModel": "OpenVINO/Qwen3.5-27B-int4-ov",
+    "ToolParser": "qwen3coder",
+    "ReasoningParser": "qwen3",
+    "ExtraArgs": ["--enable_tool_guided_generation", "true"]
+  },
+  "qwen3.6-27b": {
+    "SourceModel": "OpenVINO/Qwen3.6-27B-int4-ov",
+    "ToolParser": "qwen3coder",
+    "ReasoningParser": "qwen3",
+    "ExtraArgs": ["--enable_tool_guided_generation", "true"]
+  },
+  "gemma4": {
+    "SourceModel": "OpenVINO/gemma-4-26b-a4b-it-int4-ov",
+    "ToolParser": "gemma4",
+    "ReasoningParser": "gemma4",
+    "ExtraArgs": []
+  },
+  "qwen3-35b": {
+    "SourceModel": "OpenVINO/Qwen3.6-35B-A3B-int4-ov",
+    "ToolParser": "qwen3coder",
+    "ReasoningParser": "qwen3",
+    "ExtraArgs": ["--enable_tool_guided_generation", "true", "--allowed_media_domains", "raw.githubusercontent.com", "--cache_interval_multiplier", "64"]
+  }
+}
