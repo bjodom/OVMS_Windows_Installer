@@ -87,6 +87,22 @@ function Test-FreeDiskSpace {
     Write-Host "  - Free disk space: $([math]::Round($drive.Free / 1GB, 1)) GB"
 }
 
+function Get-Sha256Hash {
+    # Avoids depending on the Get-FileHash cmdlet, which can be missing if
+    # Microsoft.PowerShell.Utility fails to autoload in a locked-down environment.
+    param([string]$LiteralPath)
+    $sha256 = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        $fileStream = [IO.File]::OpenRead($LiteralPath)
+        try {
+            $hashBytes = $sha256.ComputeHash($fileStream)
+        }
+        finally { $fileStream.Dispose() }
+    }
+    finally { $sha256.Dispose() }
+    return [System.BitConverter]::ToString($hashBytes).Replace("-", "").ToLowerInvariant()
+}
+
 function Invoke-DownloadWithRetry {
     param([string]$Uri, [string]$OutFile, [int]$MaxAttempts = 3)
     for ($attempt = 1; $attempt -le $MaxAttempts; $attempt++) {
@@ -275,23 +291,38 @@ function Repair-HermesRepositoryForPin {
 function Invoke-HermesRepositoryStage {
     param([string]$GitExecutable)
     $previousCountText = [Environment]::GetEnvironmentVariable("GIT_CONFIG_COUNT", "Process")
-    $configIndex = 0
+    $baseIndex = 0
     if (-not [string]::IsNullOrWhiteSpace($previousCountText)) {
         $parsedCount = 0
         if ([int]::TryParse($previousCountText, [ref]$parsedCount) -and $parsedCount -ge 0) {
-            $configIndex = $parsedCount
+            $baseIndex = $parsedCount
         }
     }
 
-    $keyVariable = "GIT_CONFIG_KEY_$configIndex"
-    $valueVariable = "GIT_CONFIG_VALUE_$configIndex"
-    $previousKey = [Environment]::GetEnvironmentVariable($keyVariable, "Process")
-    $previousValue = [Environment]::GetEnvironmentVariable($valueVariable, "Process")
-
+    # Many workshop networks block outbound port 22, so a bare git@github.com clone
+    # hangs until SSH times out before falling back to HTTPS. Rewrite SSH URLs to
+    # HTTPS up front so the clone goes straight there.
+    $configEntries = @(
+        @{ Key = "core.autocrlf"; Value = "false" },
+        @{ Key = 'url.https://github.com/.insteadOf'; Value = "git@github.com:" },
+        @{ Key = 'url.https://github.com/.insteadOf'; Value = "ssh://git@github.com/" }
+    )
+    $previousKeyValues = @()
     try {
-        [Environment]::SetEnvironmentVariable("GIT_CONFIG_COUNT", [string]($configIndex + 1), "Process")
-        [Environment]::SetEnvironmentVariable($keyVariable, "core.autocrlf", "Process")
-        [Environment]::SetEnvironmentVariable($valueVariable, "false", "Process")
+        for ($entryOffset = 0; $entryOffset -lt $configEntries.Count; $entryOffset++) {
+            $configIndex = $baseIndex + $entryOffset
+            $keyVariable = "GIT_CONFIG_KEY_$configIndex"
+            $valueVariable = "GIT_CONFIG_VALUE_$configIndex"
+            $previousKeyValues += [pscustomobject]@{
+                KeyVariable   = $keyVariable
+                ValueVariable = $valueVariable
+                PreviousKey   = [Environment]::GetEnvironmentVariable($keyVariable, "Process")
+                PreviousValue = [Environment]::GetEnvironmentVariable($valueVariable, "Process")
+            }
+            [Environment]::SetEnvironmentVariable($keyVariable, $configEntries[$entryOffset].Key, "Process")
+            [Environment]::SetEnvironmentVariable($valueVariable, $configEntries[$entryOffset].Value, "Process")
+        }
+        [Environment]::SetEnvironmentVariable("GIT_CONFIG_COUNT", [string]($baseIndex + $configEntries.Count), "Process")
 
         Repair-HermesRepositoryForPin -GitExecutable $GitExecutable
         try {
@@ -305,8 +336,10 @@ function Invoke-HermesRepositoryStage {
     }
     finally {
         [Environment]::SetEnvironmentVariable("GIT_CONFIG_COUNT", $previousCountText, "Process")
-        [Environment]::SetEnvironmentVariable($keyVariable, $previousKey, "Process")
-        [Environment]::SetEnvironmentVariable($valueVariable, $previousValue, "Process")
+        foreach ($previousEntry in $previousKeyValues) {
+            [Environment]::SetEnvironmentVariable($previousEntry.KeyVariable, $previousEntry.PreviousKey, "Process")
+            [Environment]::SetEnvironmentVariable($previousEntry.ValueVariable, $previousEntry.PreviousValue, "Process")
+        }
     }
 }
 
@@ -369,7 +402,7 @@ try {
     else {
         Invoke-DownloadWithRetry -Uri $ovmsUrl -OutFile $ovmsZipPath
         $expectedDigest = Get-OVMSAssetDigest ([IO.Path]::GetFileName($ovmsUrl))
-        $actualDigest = (Get-FileHash -LiteralPath $ovmsZipPath -Algorithm SHA256).Hash.ToLowerInvariant()
+        $actualDigest = Get-Sha256Hash -LiteralPath $ovmsZipPath
         if ($actualDigest -ne $expectedDigest.ToLowerInvariant()) {
             Remove-Item -LiteralPath $ovmsZipPath -Force -ErrorAction SilentlyContinue
             throw "OVMS download failed SHA-256 verification. Expected $expectedDigest, got $actualDigest."
