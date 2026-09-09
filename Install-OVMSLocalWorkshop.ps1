@@ -31,9 +31,8 @@ $ovmsUrl = "https://github.com/openvinotoolkit/model_server/releases/download/v$
 # Fallback for the pinned asset so the archive is still verified when the GitHub API is unreachable.
 $ovmsExpectedSha256 = "fb904b4f1671beaa54d423153f8760b711754bcb645d69b81a5c16cc8fe0570a"
 $ovmsZipPath = Join-Path $env:TEMP "ovms-$ovmsVersion.zip"
-$hermesCommit = "30b83ab7b1f194503de9f5545d88c81c4db91e3f"
-$installerUrl = "https://raw.githubusercontent.com/NousResearch/hermes-agent/$hermesCommit/scripts/install.ps1"
-$installerPath = Join-Path $env:TEMP "hermes-install-$hermesCommit.ps1"
+$installerUrl = "https://hermes-agent.nousresearch.com/install.ps1"
+$installerPath = Join-Path $env:TEMP "hermes-install.ps1"
 $transcriptStarted = $false
 
 if (-not (Test-Path -LiteralPath $modelConfigPath)) {
@@ -60,14 +59,10 @@ function Write-Step {
 }
 
 function Get-OVMSAssetDigest {
+    # Skips the api.github.com release lookup entirely: that endpoint shares GitHub's
+    # unauthenticated 60-req/hour/IP limit and contributes to the 429s workshop users hit
+    # on repeated runs, for a value we already have pinned and verified in this script.
     param([string]$AssetName)
-    try {
-        $release = Invoke-RestMethod -Uri "https://api.github.com/repos/openvinotoolkit/model_server/releases/tags/v$ovmsVersion" -Headers @{ "User-Agent" = "OVMS-Local-Workshop" } -TimeoutSec 30
-        $asset = @($release.assets) | Where-Object { $_.name -eq $AssetName } | Select-Object -First 1
-        if ($asset -and $asset.digest -match "^sha256:") { return $asset.digest.Substring(7) }
-        Write-Warning "The OVMS release listing contained no digest for $AssetName; using the digest pinned in this script."
-    }
-    catch { Write-Warning "Could not retrieve the OVMS release digest from GitHub; using the digest pinned in this script." }
     return $ovmsExpectedSha256
 }
 
@@ -224,165 +219,6 @@ function Add-UserPathEntry {
     }
 }
 
-function Get-HermesGitExecutable {
-    $gitCandidates = @()
-    $pathGit = Get-Command git.exe -ErrorAction SilentlyContinue
-    if ($pathGit) { $gitCandidates += $pathGit.Source }
-    $gitCandidates += @(
-        (Join-Path $env:LOCALAPPDATA "hermes\git\cmd\git.exe"),
-        (Join-Path $env:LOCALAPPDATA "hermes\git\bin\git.exe")
-    )
-    foreach ($gitCandidate in $gitCandidates | Select-Object -Unique) {
-        if ($gitCandidate -and (Test-Path -LiteralPath $gitCandidate)) {
-            return $gitCandidate
-        }
-    }
-    throw "Git was installed by the Hermes Git stage, but git.exe could not be located."
-}
-
-function Move-HermesManagedRepositoryAside {
-    param([string]$Reason)
-    $hermesRoot = Join-Path $env:LOCALAPPDATA "hermes"
-    $repositoryPath = Join-Path $hermesRoot "hermes-agent"
-    if (-not (Test-Path -LiteralPath $repositoryPath)) { return $null }
-
-    $resolvedHermesRoot = [IO.Path]::GetFullPath($hermesRoot).TrimEnd("\") + "\"
-    $resolvedRepository = [IO.Path]::GetFullPath($repositoryPath)
-    if (-not $resolvedRepository.StartsWith($resolvedHermesRoot, [StringComparison]::OrdinalIgnoreCase)) {
-        throw "Refusing to move a repository outside the managed Hermes directory: $resolvedRepository"
-    }
-
-    $backupRoot = Join-Path $hermesRoot "backups"
-    New-Item -ItemType Directory -Path $backupRoot -Force | Out-Null
-    $backupPath = Join-Path $backupRoot ("hermes-agent-before-easy-workshop-{0}-{1}" -f (Get-Date -Format "yyyyMMdd-HHmmss"), ([Guid]::NewGuid().ToString("N").Substring(0, 8)))
-    Move-Item -LiteralPath $repositoryPath -Destination $backupPath
-    Write-Warning "$Reason The existing managed repository was preserved at: $backupPath"
-    return $backupPath
-}
-
-# The Hermes repository ships with CRLF/LF mixed line endings on some files (uv.lock,
-# website docs). If core.autocrlf converts them on checkout, git sees "local changes"
-# right after cloning and refuses to check out the pinned commit. Force autocrlf=false
-# for this repo and repair any resulting uv.lock-only churn before pinning.
-function Repair-HermesRepositoryForPin {
-    param([string]$GitExecutable)
-    $hermesRoot = Join-Path $env:LOCALAPPDATA "hermes"
-    $repositoryPath = Join-Path $hermesRoot "hermes-agent"
-    if (-not (Test-Path -LiteralPath $repositoryPath)) { return }
-
-    if (-not (Test-Path -LiteralPath (Join-Path $repositoryPath ".git"))) {
-        Move-HermesManagedRepositoryAside "The existing Hermes source directory is not a Git repository."
-        return
-    }
-
-    $originResult = Invoke-NativeCommandCapture -FilePath $GitExecutable -ArgumentList @("-C", $repositoryPath, "remote", "get-url", "origin")
-    if ($originResult.ExitCode -ne 0 -or $originResult.Text -notmatch "(?i)github\.com[:/]NousResearch/hermes-agent(?:\.git)?$") {
-        Move-HermesManagedRepositoryAside "The existing Hermes repository has an unexpected origin."
-        return
-    }
-
-    $configResult = Invoke-NativeCommandCapture -FilePath $GitExecutable -ArgumentList @("-C", $repositoryPath, "config", "core.autocrlf", "false")
-    if ($configResult.ExitCode -ne 0) {
-        Move-HermesManagedRepositoryAside "The existing Hermes repository could not be configured for LF line endings."
-        return
-    }
-
-    $statusResult = Invoke-NativeCommandCapture -FilePath $GitExecutable -ArgumentList @("-C", $repositoryPath, "status", "--porcelain", "--untracked-files=all")
-    if ($statusResult.ExitCode -ne 0) {
-        Move-HermesManagedRepositoryAside "The existing Hermes repository status could not be read."
-        return
-    }
-
-    $statusLines = @($statusResult.Text -split "`r?`n" | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
-    if ($statusLines.Count -eq 0) { return }
-
-    $dirtyPaths = @(
-        foreach ($statusLine in $statusLines) {
-            if ($statusLine.Length -ge 4) {
-                $statusLine.Substring(3).Trim().Trim('"')
-            }
-        }
-    )
-    $onlyLockfileChurn = ($dirtyPaths.Count -gt 0 -and @($dirtyPaths | Where-Object { $_ -ne "uv.lock" }).Count -eq 0)
-
-    if ($onlyLockfileChurn) {
-        $lockfilePath = Join-Path $repositoryPath "uv.lock"
-        if (Test-Path -LiteralPath $lockfilePath) {
-            $backupRoot = Join-Path $hermesRoot "backups"
-            New-Item -ItemType Directory -Path $backupRoot -Force | Out-Null
-            $lockfileBackup = Join-Path $backupRoot ("uv.lock-before-easy-workshop-{0}.bak" -f (Get-Date -Format "yyyyMMdd-HHmmss"))
-            Copy-Item -LiteralPath $lockfilePath -Destination $lockfileBackup -Force
-        }
-
-        Write-Host "  - Repairing Git line-ending churn in the managed uv.lock file"
-        $restoreResult = Invoke-NativeCommandCapture -FilePath $GitExecutable -ArgumentList @("-C", $repositoryPath, "-c", "core.autocrlf=false", "checkout", "--", "uv.lock")
-        if ($restoreResult.ExitCode -eq 0) {
-            $verifyResult = Invoke-NativeCommandCapture -FilePath $GitExecutable -ArgumentList @("-C", $repositoryPath, "status", "--porcelain", "--untracked-files=all")
-            if ($verifyResult.ExitCode -eq 0 -and [string]::IsNullOrWhiteSpace($verifyResult.Text)) {
-                Write-Host "[OK] Managed Hermes repository is clean for the pinned checkout." -ForegroundColor Green
-                return
-            }
-        }
-    }
-
-    Move-HermesManagedRepositoryAside "The managed Hermes repository contains changes that cannot be safely repaired automatically."
-}
-
-function Invoke-HermesRepositoryStage {
-    param([string]$GitExecutable)
-    $previousCountText = [Environment]::GetEnvironmentVariable("GIT_CONFIG_COUNT", "Process")
-    $baseIndex = 0
-    if (-not [string]::IsNullOrWhiteSpace($previousCountText)) {
-        $parsedCount = 0
-        if ([int]::TryParse($previousCountText, [ref]$parsedCount) -and $parsedCount -ge 0) {
-            $baseIndex = $parsedCount
-        }
-    }
-
-    # Many workshop networks block outbound port 22, so a bare git@github.com clone
-    # hangs until SSH times out before falling back to HTTPS. Rewrite SSH URLs to
-    # HTTPS up front so the clone goes straight there.
-    $configEntries = @(
-        @{ Key = "core.autocrlf"; Value = "false" },
-        @{ Key = 'url.https://github.com/.insteadOf'; Value = "git@github.com:" },
-        @{ Key = 'url.https://github.com/.insteadOf'; Value = "ssh://git@github.com/" }
-    )
-    $previousKeyValues = @()
-    try {
-        for ($entryOffset = 0; $entryOffset -lt $configEntries.Count; $entryOffset++) {
-            $configIndex = $baseIndex + $entryOffset
-            $keyVariable = "GIT_CONFIG_KEY_$configIndex"
-            $valueVariable = "GIT_CONFIG_VALUE_$configIndex"
-            $previousKeyValues += [pscustomobject]@{
-                KeyVariable   = $keyVariable
-                ValueVariable = $valueVariable
-                PreviousKey   = [Environment]::GetEnvironmentVariable($keyVariable, "Process")
-                PreviousValue = [Environment]::GetEnvironmentVariable($valueVariable, "Process")
-            }
-            [Environment]::SetEnvironmentVariable($keyVariable, $configEntries[$entryOffset].Key, "Process")
-            [Environment]::SetEnvironmentVariable($valueVariable, $configEntries[$entryOffset].Value, "Process")
-        }
-        [Environment]::SetEnvironmentVariable("GIT_CONFIG_COUNT", [string]($baseIndex + $configEntries.Count), "Process")
-
-        Repair-HermesRepositoryForPin -GitExecutable $GitExecutable
-        try {
-            Invoke-HermesInstaller "Hermes repository stage" @("-Stage", "repository", "-Commit", $hermesCommit)
-        }
-        catch {
-            Write-Warning "The first Hermes repository attempt failed. Preparing a clean managed checkout and retrying once."
-            Repair-HermesRepositoryForPin -GitExecutable $GitExecutable
-            Invoke-HermesInstaller "Hermes repository stage retry" @("-Stage", "repository", "-Commit", $hermesCommit)
-        }
-    }
-    finally {
-        [Environment]::SetEnvironmentVariable("GIT_CONFIG_COUNT", $previousCountText, "Process")
-        foreach ($previousEntry in $previousKeyValues) {
-            [Environment]::SetEnvironmentVariable($previousEntry.KeyVariable, $previousEntry.PreviousKey, "Process")
-            [Environment]::SetEnvironmentVariable($previousEntry.ValueVariable, $previousEntry.PreviousValue, "Process")
-        }
-    }
-}
-
 function Invoke-Hermes {
     param([string]$Launcher, [string[]]$HermesArguments)
     $result = Invoke-NativeCommandCapture -FilePath $Launcher -ArgumentList $HermesArguments
@@ -462,15 +298,9 @@ try {
             throw "The downloaded Hermes installer is unexpectedly small."
         }
 
-        # Staged install (uv -> git -> repository -> python -> finish) so the
-        # repository stage can force core.autocrlf=false and repair any uv.lock
-        # line-ending churn before pinning to $hermesCommit.
-        Invoke-HermesInstaller "Hermes uv stage" @("-Stage", "uv", "-Commit", $hermesCommit)
-        Invoke-HermesInstaller "Hermes Git stage" @("-Stage", "git", "-Commit", $hermesCommit)
-        $hermesGitExecutable = Get-HermesGitExecutable
-        Invoke-HermesRepositoryStage -GitExecutable $hermesGitExecutable
-        Invoke-HermesInstaller "Hermes Python stage" @("-Stage", "python", "-Commit", $hermesCommit)
-        Invoke-HermesInstaller "Complete Hermes installation" @("-SkipSetup", "-Commit", $hermesCommit)
+        # Single, non-interactive install -- equivalent to the official
+        # `iex (irm https://hermes-agent.nousresearch.com/install.ps1)` one-liner.
+        Invoke-HermesInstaller "Installing Hermes Agent" @("-SkipSetup", "-NonInteractive")
     }
     else {
         Write-Host "Hermes installation was skipped by request. Existing installation will be validated."
