@@ -103,8 +103,39 @@ function Get-Sha256Hash {
     return [System.BitConverter]::ToString($hashBytes).Replace("-", "").ToLowerInvariant()
 }
 
+function Get-HttpRetryAfterSeconds {
+    # Works for both Windows PowerShell's WebException and PowerShell 7's HttpResponseException.
+    param($ErrorRecord)
+    $response = $ErrorRecord.Exception.Response
+    if (-not $response) { return $null }
+    try {
+        $retryAfterValues = $null
+        if ($response.Headers -is [System.Net.Http.Headers.HttpResponseHeaders]) {
+            if ($response.Headers.RetryAfter -and $response.Headers.RetryAfter.Delta) {
+                return [int]$response.Headers.RetryAfter.Delta.Value.TotalSeconds
+            }
+        }
+        else {
+            $retryAfterValues = $response.Headers["Retry-After"]
+        }
+        if ($retryAfterValues) {
+            $parsedSeconds = 0
+            if ([int]::TryParse(@($retryAfterValues)[0], [ref]$parsedSeconds)) { return $parsedSeconds }
+        }
+    }
+    catch { }
+    return $null
+}
+
+function Get-HttpStatusCode {
+    param($ErrorRecord)
+    $response = $ErrorRecord.Exception.Response
+    if ($response -and $response.StatusCode) { return [int]$response.StatusCode }
+    return $null
+}
+
 function Invoke-DownloadWithRetry {
-    param([string]$Uri, [string]$OutFile, [int]$MaxAttempts = 3)
+    param([string]$Uri, [string]$OutFile, [int]$MaxAttempts = 6)
     for ($attempt = 1; $attempt -le $MaxAttempts; $attempt++) {
         try {
             Invoke-WebRequest -Uri $Uri -OutFile $OutFile -UseBasicParsing
@@ -113,8 +144,17 @@ function Invoke-DownloadWithRetry {
         catch {
             Remove-Item -LiteralPath $OutFile -Force -ErrorAction SilentlyContinue
             if ($attempt -eq $MaxAttempts) { throw }
-            $retryDelay = 5 * $attempt
-            Write-Warning "Download attempt $attempt of $MaxAttempts failed ($($_.Exception.Message)). Retrying in $retryDelay seconds."
+            $statusCode = Get-HttpStatusCode $_
+            $retryAfterSeconds = Get-HttpRetryAfterSeconds $_
+            if ($statusCode -eq 429) {
+                # GitHub rate limits can require a longer cooldown than a simple backoff.
+                $retryDelay = if ($retryAfterSeconds) { $retryAfterSeconds } else { 30 * $attempt }
+                Write-Warning "Download attempt $attempt of $MaxAttempts was rate limited (HTTP 429). Retrying in $retryDelay seconds."
+            }
+            else {
+                $retryDelay = 5 * $attempt
+                Write-Warning "Download attempt $attempt of $MaxAttempts failed ($($_.Exception.Message)). Retrying in $retryDelay seconds."
+            }
             Start-Sleep -Seconds $retryDelay
         }
     }
