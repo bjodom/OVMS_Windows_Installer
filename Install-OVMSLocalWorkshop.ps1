@@ -82,6 +82,27 @@ function Test-FreeDiskSpace {
     Write-Host "  - Free disk space: $([math]::Round($drive.Free / 1GB, 1)) GB"
 }
 
+function Test-UvInstalled {
+    if (Get-Command uv -ErrorAction SilentlyContinue) {
+        Write-Host "  - uv (astral-sh) found" -ForegroundColor Green
+        return
+    }
+    Write-Warning "uv (astral-sh.uv) was not found on PATH; installing via winget..."
+    if (-not (Get-Command winget -ErrorAction SilentlyContinue)) {
+        throw "uv is required but not installed, and winget is not available to install it automatically. Install uv manually: https://docs.astral.sh/uv/getting-started/installation/"
+    }
+    winget install --id astral-sh.uv --exact --silent --accept-package-agreements --accept-source-agreements
+    if ($LASTEXITCODE -ne 0) {
+        throw "winget install astral-sh.uv failed with exit code $LASTEXITCODE."
+    }
+    # Refresh PATH from the registry so this process can see the newly installed uv.exe.
+    $env:Path = [Environment]::GetEnvironmentVariable("Path", "User") + ";" + [Environment]::GetEnvironmentVariable("Path", "Machine")
+    if (-not (Get-Command uv -ErrorAction SilentlyContinue)) {
+        throw "uv was installed via winget but is not on PATH in this session. Open a new terminal and re-run setup."
+    }
+    Write-Host "  - uv installed via winget" -ForegroundColor Green
+}
+
 function Get-Sha256Hash {
     # Avoids depending on the Get-FileHash cmdlet, which can be missing if
     # Microsoft.PowerShell.Utility fails to autoload in a locked-down environment.
@@ -261,15 +282,17 @@ try {
 
     Write-Step 1 "Verify this computer"
     Test-FreeDiskSpace
+    Test-UvInstalled
     $gpuControllers = @(Get-CimInstance Win32_VideoController | Select-Object Name, DriverVersion)
     $gpuControllers | Format-Table -AutoSize | Out-Host
     $intelControllers = @($gpuControllers | Where-Object { $_.Name -match "Intel" })
     if ($intelControllers.Count -eq 0) {
         Write-Warning "No Intel GPU was detected. OVMS will still run, but on CPU only (slower)."
     }
-    # No Vulkan SDK and no manual Git/uv install are required: OVMS ships as a
+    # No Vulkan SDK or manual Git install is required: OVMS ships as a
     # self-contained prebuilt zip, and the official Hermes installer provisions
-    # its own portable Git and uv automatically in the next step.
+    # its own portable Git automatically in the next step. System-wide uv is
+    # verified above since this script relies on it being on PATH.
 
     Write-Step 2 "Download and extract OVMS $ovmsVersion"
     if (Test-Path -LiteralPath $ovmsExe) {
