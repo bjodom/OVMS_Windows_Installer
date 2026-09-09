@@ -240,6 +240,28 @@ function Add-UserPathEntry {
     }
 }
 
+function Test-HasInteractiveConsole {
+    try {
+        return (
+            [Environment]::UserInteractive `
+            -and (-not [Console]::IsInputRedirected) `
+            -and (-not [Console]::IsOutputRedirected) `
+            -and ($Host.Name -eq "ConsoleHost")
+        )
+    }
+    catch { return $false }
+}
+
+function Confirm-ModelDownload {
+    param([string]$ModelName, [string]$SourceModel)
+    if (-not (Test-HasInteractiveConsole)) { return $true }
+    Write-Host ""
+    Write-Host "Model $ModelName ($SourceModel) has not finished downloading yet." -ForegroundColor Yellow
+    Write-Host "Starting the server now will begin a large (multi-GB) download from Hugging Face." -ForegroundColor Yellow
+    $response = Read-Host "Start the server and begin the model download now? [Y/n]"
+    return ($response -eq "" -or $response -match "^[Yy]")
+}
+
 function Invoke-Hermes {
     param([string]$Launcher, [string[]]$HermesArguments)
     $result = Invoke-NativeCommandCapture -FilePath $Launcher -ArgumentList $HermesArguments
@@ -343,7 +365,14 @@ try {
 
     Write-Step 4 "Start $Model on OVMS (model downloads automatically on first run)"
     $startScript = Join-Path $installRoot "Start-OVMSLocalWorkshop.ps1"
-    if (-not $DoNotStartServer) {
+    $modelDir = Join-Path (Join-Path $installRoot "models") $modelAlias
+    $modelAlreadyDownloaded = (Test-Path -LiteralPath $modelDir) -and (Get-ChildItem -LiteralPath $modelDir -Recurse -File -ErrorAction SilentlyContinue | Select-Object -First 1)
+    $skipServerStart = $DoNotStartServer
+    if (-not $skipServerStart -and -not $modelAlreadyDownloaded -and -not (Confirm-ModelDownload -ModelName $Model -SourceModel $selectedModel.SourceModel)) {
+        Write-Host "Model download declined. Start it later with Start-OVMSLocalWorkshop.ps1." -ForegroundColor Yellow
+        $skipServerStart = $true
+    }
+    if (-not $skipServerStart) {
         & $startScript -Model $Model -WaitSeconds $WaitSeconds -Port $Port
     }
     else {
@@ -355,8 +384,8 @@ try {
     }
 
     Write-Step 5 "Test the local OpenAI-compatible API"
-    if ($DoNotStartServer) {
-        Write-Host "API test skipped because -DoNotStartServer was selected."
+    if ($skipServerStart) {
+        Write-Host "API test skipped because the server was not started."
     }
     else {
         # Informational only: the endpoint readiness check in Step 4 already proved the
