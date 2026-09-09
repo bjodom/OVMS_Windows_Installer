@@ -237,7 +237,7 @@ port 8080 instead.
 
 - Downloads and extracts OVMS 2026.3.1 to
   `%USERPROFILE%\OVMS-Local-Workshop\hermes-ovms-workshop-windows-x64-intel-v1.0.0\ovms`
-- Installs the pinned Hermes Agent build under `%LOCALAPPDATA%\hermes`
+- Installs the latest Hermes Agent build under `%LOCALAPPDATA%\hermes`
 - Lets the official Hermes installer provision its private Python, Node.js,
   `uv`, Git, and required packages
 - Downloads and caches the selected model from Hugging Face on first run into the
@@ -249,12 +249,11 @@ port 8080 instead.
 The endpoint is bound to `127.0.0.1`, so it is not exposed to other computers.
 Installation logs are saved under the installed workshop's `logs` directory.
 
-The installer also verifies the OVMS archive against a pinned SHA-256 digest,
-preserves an existing Hermes configuration before changing it, and
-handles common Hermes repository line-ending conflicts when pinning the requested
-commit. The start script restores the caller's PowerShell environment after loading
-OVMS runtime variables, detects port conflicts, and removes a stale OVMS process left
-behind by an interrupted startup.
+The installer also verifies the OVMS archive against a pinned SHA-256 digest and
+preserves an existing Hermes configuration before changing it. The start script
+restores the caller's PowerShell environment after loading OVMS runtime variables,
+detects port conflicts, and removes a stale OVMS process left behind by an
+interrupted startup.
 
 ## Where the model files are stored
 
